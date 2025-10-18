@@ -1,0 +1,399 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Confirmação de Presença</title>
+    <!-- Carrega o Tailwind CSS para estilização moderna e responsiva -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Configuração de fontes e cores do Tailwind -->
+    <script>
+        tailwind.config = {
+            theme: {
+                extend: {
+                    colors: {
+                        'primary': '#48BB78', // Um verde agradável
+                        'secondary': '#38A169', // Um verde mais escuro
+                        'accent': '#F6E05E', // Amarelo/Dourado para destaque
+                    },
+                    fontFamily: {
+                        sans: ['Inter', 'sans-serif'],
+                    },
+                }
+            }
+        }
+    </script>
+    <style>
+        /* Estilos personalizados para a estética geral */
+        body {
+            background-color: #f7fafc; /* Cor de fundo clara */
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 100vh;
+            padding: 1rem;
+        }
+        .form-container {
+            box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -2px rgba(0, 0, 0, 0.05);
+        }
+    </style>
+    <!-- Importações do Firebase -->
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, collection, addDoc, doc, setLogLevel, onSnapshot } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+        // Variáveis globais obrigatórias (definidas pelo ambiente Canvas)
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+        const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : null;
+        const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+
+        let db = null;
+        let auth = null;
+        let isAuthReady = false;
+
+        /**
+         * Inicializa o Firebase e autentica o usuário.
+         */
+        async function initializeFirebase() {
+            try {
+                if (!firebaseConfig) {
+                    throw new Error("Configuração do Firebase não encontrada.");
+                }
+
+                const app = initializeApp(firebaseConfig);
+                db = getFirestore(app);
+                auth = getAuth(app);
+                setLogLevel('debug'); // Ativa logs de debug para o Firestore
+
+                // Autenticação
+                if (initialAuthToken) {
+                    await signInWithCustomToken(auth, initialAuthToken);
+                } else {
+                    await signInAnonymously(auth);
+                }
+                isAuthReady = true;
+
+                console.log("Firebase e autenticação inicializados com sucesso.");
+                setupRsvpListener(); // Inicia a escuta de dados após a inicialização
+            } catch (error) {
+                console.error("Erro ao inicializar Firebase ou autenticar:", error);
+                displayMessage("Erro ao carregar o serviço de RSVP. Tente novamente mais tarde.", 'error');
+            }
+        }
+
+        /**
+         * Exibe uma mensagem de feedback (sucesso/erro) para o usuário.
+         * @param {string} message - A mensagem a ser exibida.
+         * @param {string} type - 'success' ou 'error'.
+         */
+        function displayMessage(message, type) {
+            const messageBox = document.getElementById('message-box');
+            messageBox.innerHTML = message;
+            messageBox.className = `p-3 mb-4 rounded-lg text-sm text-center font-semibold transition-opacity duration-300 ${type === 'success' ? 'bg-primary text-white' : 'bg-red-500 text-white'} opacity-100`;
+            messageBox.style.display = 'block';
+
+            // Oculta a mensagem após 5 segundos
+            setTimeout(() => {
+                messageBox.classList.remove('opacity-100');
+                messageBox.classList.add('opacity-0');
+                setTimeout(() => messageBox.style.display = 'none', 300);
+            }, 5000);
+        }
+
+        /**
+         * Manipula o envio do formulário e salva os dados no Firestore.
+         * @param {Event} event - O evento de submissão do formulário.
+         */
+        window.handleRsvpSubmit = async function(event) {
+            event.preventDefault();
+
+            if (!db || !isAuthReady) {
+                displayMessage("O sistema não está pronto. Por favor, aguarde ou recarregue a página.", 'error');
+                return;
+            }
+
+            const form = event.target;
+            // Usa UID para autenticação, mas a submissão vai para o caminho público
+            const userId = auth.currentUser?.uid || crypto.randomUUID(); 
+            const attending = form.elements['attending'].value === 'true';
+
+            const rsvpData = {
+                name: form.elements['name'].value.trim(),
+                email: form.elements['email'].value.trim(),
+                attending: attending,
+                guests: attending ? parseInt(form.elements['guests'].value, 10) : 0,
+                timestamp: new Date(),
+                userId: userId,
+                notes: form.elements['notes'].value.trim()
+            };
+
+            // Validação básica
+            if (!rsvpData.name || !rsvpData.email) {
+                displayMessage("Por favor, preencha seu Nome e Email.", 'error');
+                return;
+            }
+
+            const submitButton = document.getElementById('submit-btn');
+            submitButton.disabled = true;
+            submitButton.textContent = 'Enviando...';
+
+            try {
+                // *** MUDANÇA CRUCIAL: Armazena no caminho público para que o organizador possa consultar. ***
+                const rsvpsCollectionRef = collection(db, 'artifacts', appId, 'public', 'data', 'rsvps');
+
+                await addDoc(rsvpsCollectionRef, rsvpData);
+
+                displayMessage(attending ?
+                    "Sua presença foi confirmada com sucesso! Mal podemos esperar para te ver!" :
+                    "Sua ausência foi registrada. Sentiremos sua falta!",
+                    'success'
+                );
+                // Opcional: Limpar o formulário após o sucesso
+                form.reset();
+                toggleGuests(false); // Esconde o campo de convidados após reset
+                
+            } catch (error) {
+                console.error("Erro ao salvar o RSVP:", error);
+                displayMessage("Ocorreu um erro ao confirmar. Tente novamente.", 'error');
+            } finally {
+                submitButton.disabled = false;
+                submitButton.textContent = 'Confirmar Presença';
+            }
+        };
+
+        /**
+         * Configura o listener em tempo real para as confirmações de presença.
+         */
+        function setupRsvpListener() {
+            if (!db || !isAuthReady) return;
+
+            // Usando o caminho público para que o organizador (você) possa ver todos os dados.
+            const rsvpsCollectionRef = collection(db, 'artifacts', appId, 'public', 'data', 'rsvps');
+
+            // Listener em tempo real (onSnapshot)
+            onSnapshot(rsvpsCollectionRef, (snapshot) => {
+                const rsvps = [];
+                snapshot.forEach(doc => {
+                    const data = doc.data();
+                    rsvps.push({ id: doc.id, ...data });
+                });
+                
+                // Ordenar os dados por nome (sortimento client-side)
+                rsvps.sort((a, b) => a.name.localeCompare(b.name, 'pt-BR', { sensitivity: 'base' }));
+
+                renderRsvpList(rsvps);
+
+            }, (error) => {
+                console.error("Erro ao escutar as confirmações:", error);
+                // O erro não é exibido para o usuário final.
+            });
+        }
+
+        /**
+         * Renderiza a lista de RSVPs e atualiza os contadores no Dashboard.
+         * @param {Array} rsvps - A lista de objetos RSVP.
+         */
+        function renderRsvpList(rsvps) {
+            const listContainer = document.getElementById('rsvp-list');
+            const totalConfirmedElement = document.getElementById('total-confirmed');
+            const totalGuestsElement = document.getElementById('total-guests');
+            const dashboard = document.getElementById('organizer-dashboard');
+            
+            listContainer.innerHTML = '';
+            
+            let totalConfirmedCount = 0;
+            let totalGuestsCount = 0;
+            let confirmedListItems = [];
+
+            if (rsvps.length > 0) {
+                dashboard.classList.remove('hidden');
+            } else {
+                 // Se não há dados, mostra a mensagem e zera os contadores
+                listContainer.innerHTML = '<li class="p-3 text-center text-gray-500 italic">Nenhuma confirmação ainda.</li>';
+                totalConfirmedElement.textContent = '0';
+                totalGuestsElement.textContent = '0';
+                return;
+            }
+
+
+            rsvps.forEach(rsvp => {
+                if (rsvp.attending) {
+                    totalConfirmedCount++;
+                    totalGuestsCount += rsvp.guests;
+
+                    const listItem = document.createElement('li');
+                    listItem.className = 'flex justify-between items-start flex-wrap p-3 border-b border-gray-100 last:border-b-0';
+                    
+                    const nameAndGuests = `
+                        <span class="font-semibold text-gray-800">${rsvp.name}</span>
+                        <span class="text-sm text-primary font-medium">${rsvp.guests} Pessoas</span>
+                    `;
+                    
+                    const notes = rsvp.notes ? `<p class="text-xs text-gray-500 mt-1 italic w-full">Obs: ${rsvp.notes}</p>` : '';
+
+                    listItem.innerHTML = `
+                        <div class="flex flex-col w-full">
+                            <div class="flex justify-between items-center w-full">
+                                ${nameAndGuests}
+                            </div>
+                            ${notes}
+                        </div>
+                    `;
+                    confirmedListItems.push(listItem);
+                }
+            });
+
+            // Adiciona todos os itens confirmados de uma vez
+            confirmedListItems.forEach(item => listContainer.appendChild(item));
+
+            totalConfirmedElement.textContent = totalConfirmedCount;
+            totalGuestsElement.textContent = totalGuestsCount;
+        }
+
+        // Inicializa o Firebase ao carregar a página
+        window.addEventListener('load', initializeFirebase);
+    </script>
+</head>
+<body class="font-sans bg-gray-50">
+
+    <div class="form-container w-full max-w-lg mx-auto bg-white p-6 sm:p-10 rounded-xl border border-gray-200">
+        <!-- Cabeçalho -->
+        <div class="text-center mb-8">
+            <h1 class="text-4xl font-extrabold text-gray-800 mb-2">Confirmação de Presença</h1>
+            <p class="text-xl text-primary font-semibold">Aniversário da Aurora</p>
+            <p class="text-sm text-gray-500 mt-1">Por favor, confirme sua presença até 17/11/2025.</p>
+        </div>
+
+        <!-- Caixa de Mensagens (Feedback) -->
+        <div id="message-box" class="opacity-0 hidden" style="display: none;"></div>
+
+        <!-- Formulário de RSVP -->
+        <form id="rsvp-form" onsubmit="handleRsvpSubmit(event)" class="space-y-6">
+
+            <!-- Nome Completo -->
+            <div>
+                <label for="name" class="block text-sm font-medium text-gray-700 mb-1">Seu Nome Completo</label>
+                <input type="text" id="name" name="name" required
+                       class="w-full p-3 border border-gray-300 rounded-lg focus:ring-primary focus:border-primary transition duration-150">
+            </div>
+
+            <!-- Email -->
+            <div>
+                <label for="email" class="block text-sm font-medium text-gray-700 mb-1">Seu Melhor Email</label>
+                <input type="email" id="email" name="email" required
+                       class="w-full p-3 border border-gray-300 rounded-lg focus:ring-primary focus:border-primary transition duration-150">
+            </div>
+
+            <!-- Opções de Presença -->
+            <fieldset class="space-y-4">
+                <legend class="text-sm font-medium text-gray-700 mb-2">Você irá comparecer?</legend>
+                
+                <!-- Confirma Presença (Sim) -->
+                <div class="flex items-center p-3 border border-primary rounded-lg shadow-sm bg-primary/5">
+                    <input id="attending-yes" name="attending" type="radio" value="true" required
+                           onchange="toggleGuests(true)"
+                           class="h-4 w-4 text-primary border-gray-300 focus:ring-primary transition duration-150 cursor-pointer">
+                    <label for="attending-yes" class="ml-3 block text-base font-medium text-gray-800 cursor-pointer">
+                        Sim, estarei presente!
+                    </label>
+                </div>
+
+                <!-- Não Confirma Presença (Não) -->
+                <div class="flex items-center p-3 border border-gray-300 rounded-lg shadow-sm">
+                    <input id="attending-no" name="attending" type="radio" value="false" required
+                           onchange="toggleGuests(false)"
+                           class="h-4 w-4 text-primary border-gray-300 focus:ring-primary transition duration-150 cursor-pointer">
+                    <label for="attending-no" class="ml-3 block text-base font-medium text-gray-800 cursor-pointer">
+                        Não poderei comparecer.
+                    </label>
+                </div>
+            </fieldset>
+
+            <!-- Número de Convidados (Aparece se SIM for selecionado) -->
+            <div id="guests-field" class="hidden">
+                <label for="guests" class="block text-sm font-medium text-gray-700 mb-1">
+                    Total de Pessoas (Incluindo Você)
+                </label>
+                <input type="number" id="guests" name="guests" value="1" min="1" max="10"
+                       class="w-full p-3 border border-gray-300 rounded-lg focus:ring-primary focus:border-primary transition duration-150">
+                <p class="text-xs text-gray-500 mt-1">Insira o número total de pessoas do seu grupo, incluindo você.</p>
+            </div>
+
+            <!-- Notas/Observações -->
+            <div>
+                <label for="notes" class="block text-sm font-medium text-gray-700 mb-1">Observações (Opcional)</label>
+                <textarea id="notes" name="notes" rows="3"
+                          class="w-full p-3 border border-gray-300 rounded-lg focus:ring-primary focus:border-primary transition duration-150"
+                          placeholder="Ex: Restrição alimentar, necessidade especial..."></textarea>
+            </div>
+
+            <!-- Botão de Submissão -->
+            <button type="submit" id="submit-btn"
+                    class="w-full bg-primary hover:bg-secondary text-white font-bold py-3 rounded-lg transition duration-200 ease-in-out transform hover:scale-[1.01] focus:outline-none focus:ring-4 focus:ring-primary focus:ring-opacity-50">
+                Confirmar Presença
+            </button>
+        </form>
+
+        <!-- DASHBOARD DO ORGANIZADOR (Oculto por padrão, aparece com as confirmações) -->
+        <div id="organizer-dashboard" class="mt-10 pt-6 border-t border-gray-200 hidden">
+            <h2 class="text-2xl font-bold text-gray-700 mb-4 text-center">Resumo das Confirmações</h2>
+
+            <!-- Cards de Contagem -->
+            <div class="grid grid-cols-2 gap-4 mb-6">
+                <div class="bg-primary/10 p-4 rounded-lg text-center">
+                    <p class="text-xs text-primary font-medium uppercase">Convites Confirmados</p>
+                    <p id="total-confirmed" class="text-3xl font-extrabold text-primary">0</p>
+                </div>
+                <div class="bg-primary/20 p-4 rounded-lg text-center">
+                    <p class="text-xs text-primary font-medium uppercase">Total de Pessoas</p>
+                    <p id="total-guests" class="text-3xl font-extrabold text-secondary">0</p>
+                </div>
+            </div>
+
+            <!-- Lista de Convidados Confirmados -->
+            <h3 class="text-xl font-semibold text-gray-700 mb-3">Lista de Presenças (Sim)</h3>
+            <div class="max-h-80 overflow-y-auto border border-gray-200 rounded-lg bg-gray-50">
+                <ul id="rsvp-list" class="divide-y divide-gray-100">
+                    <!-- Itens serão injetados aqui pelo JavaScript -->
+                    <li class="p-3 text-center text-gray-500 italic">Nenhuma confirmação ainda.</li>
+                </ul>
+            </div>
+            
+        </div>
+
+        <p class="text-center text-xs text-gray-400 mt-6">Seus dados serão utilizados apenas para a organização do evento.</p>
+    </div>
+
+    <script>
+        /**
+         * Alterna a visibilidade do campo de Número de Convidados.
+         * @param {boolean} show - Se deve mostrar (true) ou ocultar (false).
+         */
+        function toggleGuests(show) {
+            const guestsField = document.getElementById('guests-field');
+            if (show) {
+                guestsField.classList.remove('hidden');
+                // Adiciona 'required' apenas se a pessoa confirmar presença
+                document.getElementById('guests').setAttribute('required', 'required'); 
+            } else {
+                guestsField.classList.add('hidden');
+                document.getElementById('guests').removeAttribute('required');
+                document.getElementById('guests').value = 0; // Zera o valor se a pessoa não for
+            }
+        }
+
+        // Inicializa o estado (se for um recarregamento ou se já houver um valor)
+        document.addEventListener('DOMContentLoaded', () => {
+            const attendingYes = document.getElementById('attending-yes');
+            
+            // Garante que o estado inicial do campo de convidados está correto
+            if (attendingYes.checked) {
+                toggleGuests(true);
+            } else {
+                toggleGuests(false);
+            }
+        });
+    </script>
+</body>
+</html>
